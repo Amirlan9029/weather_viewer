@@ -4,6 +4,8 @@ A lightweight, production-ready Python data pipeline that collects real-time met
 
 Built with a clean, modular architecture, this project serves as a practical demonstration of data pipeline engineering, robust error handling, and local storage optimization.
 
+P.S. Written by Google AI
+
 ---
 
 ## 🏗️ Architecture & Component Design
