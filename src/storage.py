@@ -9,58 +9,57 @@ DB_PATH = os.path.join(DB_DIR, "weather.db")
 
 def init_db():
     """Инициализирует базу данных: создает папку data и таблицу погоды."""
-    # Создаем папку data, если её нет
     if not os.path.exists(DB_DIR):
         os.makedirs(DB_DIR)
 
-    # Подключаемся к базе (если файла нет, SQLite создаст его сам)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # Создаем таблицу для хранения метеоданных
+    # Модернизированная таблица с поддержкой колонки city и apparent_temp
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS weather_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT UNIQUE,
+            city TEXT,
+            timestamp TEXT,
             temperature REAL,
+            apparent_temp REAL,
             humidity INTEGER,
             pressure REAL,
             wind_speed REAL,
-            created_at TEXT
+            created_at TEXT,
+            UNIQUE(timestamp, city) -- Защита от дубликатов в рамках одного города
         )
     """
     )
 
     conn.commit()
     conn.close()
-    print("[Хранилище] База данных успешно инициализирована.")
 
 
-def save_weather_data(data: dict) -> bool:
-    """Принимает словарь от коллектора и сохраняет его в БД.
-
-    Игнорирует дубликаты по полю timestamp.
-    """
+def save_weather_data(data: dict, city_name: str) -> bool:
+    """Принимает словарь от коллектора и сохраняет его в БД под именем конкретного города."""
     if not data:
         return False
 
-    init_db()  # На всякий случай проверяем, что таблица существует
+    init_db()
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
     try:
-        # Используем INSERT OR IGNORE, чтобы не плодить дубли за один и тот же час
+        # Добавляем city_name в INSERT
         cursor.execute(
             """
             INSERT OR IGNORE INTO weather_history 
-            (timestamp, temperature, humidity, pressure, wind_speed, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (city, timestamp, temperature, apparent_temp, humidity, pressure, wind_speed, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
+                city_name,
                 data["timestamp"],
                 data["temperature"],
+                data.get("apparent_temp"),
                 data["humidity"],
                 data["pressure"],
                 data["wind_speed"],
@@ -71,10 +70,12 @@ def save_weather_data(data: dict) -> bool:
         conn.commit()
 
         if cursor.rowcount > 0:
-            print(f"[Хранилище] Данные за {data['timestamp']} успешно сохранены.")
+            print(
+                f"[Хранилище] [{city_name}] Данные за {data['timestamp']} успешно сохранены."
+            )
         else:
             print(
-                f"[Хранилище] Запись за {data['timestamp']} уже существует. Пропущено."
+                f"[Хранилище] [{city_name}] Запись за {data['timestamp']} уже существует. Пропущено."
             )
 
         return True
@@ -85,17 +86,38 @@ def save_weather_data(data: dict) -> bool:
         conn.close()
 
 
-def clean_old_data(days_to_keep: int = 30):
-    """Блок чистки: удаляет данные старше указанного количества дней."""
+def get_records_count(city_name: str = None) -> int:
+    """Возвращает количество записей в виде чистого числа (int)."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # Вычисляем пограничную дату (все, что раньше неё — удаляем)
+    try:
+        if city_name:
+            cursor.execute(
+                "SELECT COUNT(*) FROM weather_history WHERE city = ?",
+                (city_name,),
+            )
+        else:
+            cursor.execute("SELECT COUNT(*) FROM weather_history")
+
+        count = cursor.fetchone()
+        # ИСПРАВЛЕНО: Достаем число из кортежа. Если данных нет, вернем 0
+        return count[0] if count else 0
+    except sqlite3.Error as error:
+        print(f"[Хранилище] Ошибка при подсчете записей: {error}")
+        return 0
+    finally:
+        conn.close()
+
+
+def clean_old_data(days_to_keep: int = 30):
+    """Блок чистки: удаляет данные старше указанного количества дней по всей базе."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
     cutoff_date = (datetime.now() - timedelta(days=days_to_keep)).isoformat()
 
     try:
-        # Open-Meteo возвращает время в формате ISO (YYYY-MM-DDTHH:MM),
-        # поэтому мы можем безопасно сравнивать их как строки
         cursor.execute(
             "DELETE FROM weather_history WHERE timestamp < ?", (cutoff_date,)
         )
@@ -104,26 +126,27 @@ def clean_old_data(days_to_keep: int = 30):
             print(
                 f"[Хранилище] Очистка: удалено {cursor.rowcount} устаревших записей."
             )
-        else:
-            print("[Хранилище] Очистка: устаревших данных не обнаружено.")
     except sqlite3.Error as error:
         print(f"[Хранилище] Ошибка при очистке БД: {error}")
     finally:
         conn.close()
 
-def get_records_count() -> int:
-    """Возвращает общее количество записей в таблице погоды."""
+def get_monitored_cities() -> list[str]:
+    """Возвращает список всех уникальных городов, которые уже есть в базе данных."""
+    init_db()  # На случай, если файла БД еще нет
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     try:
-        # COUNT(*) заставляет SQLite мгновенно вернуть число строк в таблице
-        cursor.execute("SELECT COUNT(*) FROM weather_history")
-        # fetchone() забирает первую строчку результата, а [0] — само число
-        count = cursor.fetchone()[0]
-        return count
+        # Выбираем только уникальные имена городов
+        cursor.execute("SELECT DISTINCT city FROM weather_history")
+        # Извлекаем строки и превращаем список кортежей [('Астана',), ('Алматы',)] в плоский список строк
+        cities = [row[0] for row in cursor.fetchall()]
+        return cities
     except sqlite3.Error as error:
-        print(f"[Хранилище] Ошибка при подсчете записей: {error}")
-        return 0
+        print(
+            f"[Хранилище] Ошибка при получении списка сохраненных городов: {error}"
+        )
+        return []
     finally:
         conn.close()
